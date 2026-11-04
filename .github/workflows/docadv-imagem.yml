@@ -1,9 +1,12 @@
 # Imagem da Evolution Go usada pelo DOC ADV (fork com o whatsmeow atualizado).
-# Roda ao receber uma tag v*-docadv* ou à mão; publica em ghcr.io/hlspablo/evolution-go.
+# Roda a cada merge na branch docadv, ao receber uma tag v*-docadv* ou à mão; publica em ghcr.io/hlspablo/evolution-go.
+# Publicar não muda a VPS: lá a versão só troca com /opt/evolution-go/atualizar.sh <tag>.
 name: DOC ADV - imagem
 
 on:
   push:
+    branches:
+      - docadv
     tags:
       - "v*-docadv*"
   workflow_dispatch:

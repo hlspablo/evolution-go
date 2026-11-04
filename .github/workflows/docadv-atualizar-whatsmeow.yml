@@ -1,0 +1,72 @@
+# Robô do DOC ADV: toda segunda (e à mão), procura whatsmeow novo, monta a imagem para testar
+# e abre um PR na branch docadv. Nada entra sozinho: aprovar = fazer o merge do PR.
+name: DOC ADV - atualizar whatsmeow
+
+on:
+  schedule:
+    - cron: "0 11 * * 1" # segunda, 08:00 em Brasília
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: docadv-atualizar-whatsmeow
+  cancel-in-progress: false
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docadv
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Atualizar o whatsmeow para a última versão
+        id: versao
+        run: |
+          antes=$(go list -m -f '{{.Version}}' go.mau.fi/whatsmeow)
+          go get go.mau.fi/whatsmeow@main
+          go mod tidy
+          depois=$(go list -m -f '{{.Version}}' go.mau.fi/whatsmeow)
+          goversao=$(go list -m -f '{{.GoVersion}}')
+          echo "antes=$antes" >> "$GITHUB_OUTPUT"
+          echo "depois=$depois" >> "$GITHUB_OUTPUT"
+          echo "goversao=$goversao" >> "$GITHUB_OUTPUT"
+          echo "commit_antes=${antes##*-}" >> "$GITHUB_OUTPUT"
+          echo "commit_depois=${depois##*-}" >> "$GITHUB_OUTPUT"
+          echo "whatsmeow: $antes -> $depois (go $goversao)"
+
+      - name: Montar a imagem para testar (sem publicar)
+        id: montagem
+        if: steps.versao.outputs.antes != steps.versao.outputs.depois
+        continue-on-error: true
+        run: docker build -t teste-docadv .
+
+      - name: Abrir o PR para aprovação
+        if: steps.versao.outputs.antes != steps.versao.outputs.depois
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: robo/whatsmeow
+          base: docadv
+          delete-branch: true
+          commit-message: "deps: whatsmeow ${{ steps.versao.outputs.depois }}"
+          title: "${{ steps.montagem.outcome == 'success' && '✅' || '❌' }} whatsmeow ${{ steps.versao.outputs.depois }}"
+          body: |
+            O robô achou uma versão nova do whatsmeow.
+
+            - **Antes:** `${{ steps.versao.outputs.antes }}`
+            - **Depois:** `${{ steps.versao.outputs.depois }}`
+            - **Go exigido:** `${{ steps.versao.outputs.goversao }}` (o `Dockerfile` usa a imagem `golang` da primeira linha)
+            - **O que mudou no whatsmeow:** https://github.com/tulir/whatsmeow/compare/${{ steps.versao.outputs.commit_antes }}...${{ steps.versao.outputs.commit_depois }}
+            - **Montagem da imagem de teste:** ${{ steps.montagem.outcome == 'success' && '✅ passou' || '❌ falhou — precisa de ajuste antes do merge (veja o log da execução)' }}
+
+            **Para aprovar:** faça o merge. A imagem é publicada no GHCR com a tag `docadv-<commit>`.
+            Ela só vai para a VPS quando alguém rodar `/opt/evolution-go/atualizar.sh docadv-<commit>`.
