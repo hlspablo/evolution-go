@@ -301,20 +301,25 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 	return nil
 }
 
-func (w whatsmeowService) StartClient(cd *ClientData) {
+// O mesmo container do whatsmeow serve todos os clientes. Antes, cada StartClient
+// abria um pool novo com sqlstore.New e nunca o fechava: um loop de QR sem leitura
+// esgotou o max_connections do Postgres ("pq: sorry, too many clients already") e
+// nenhuma instância conseguia mais conectar nem gerar QR.
+var (
+	sharedStoreMu        sync.Mutex
+	sharedStoreContainer *sqlstore.Container
+)
 
-	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
+func (w whatsmeowService) sharedContainer() (*sqlstore.Container, error) {
+	sharedStoreMu.Lock()
+	defer sharedStoreMu.Unlock()
 
-	var deviceStore *store.Device
-	var err error
-
-	if w.clientPointer[cd.Instance.Id] != nil {
-		if w.clientPointer[cd.Instance.Id].IsConnected() {
-			return
-		}
+	if sharedStoreContainer != nil {
+		return sharedStoreContainer, nil
 	}
 
 	var container *sqlstore.Container
+	var err error
 
 	if w.config.WaDebug != "" {
 		dbLog := waLog.Stdout("Database", w.config.WaDebug, true)
@@ -332,6 +337,29 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 			container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
 		}
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	sharedStoreContainer = container
+	return container, nil
+}
+
+func (w whatsmeowService) StartClient(cd *ClientData) {
+
+	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
+
+	var deviceStore *store.Device
+	var err error
+
+	if w.clientPointer[cd.Instance.Id] != nil {
+		if w.clientPointer[cd.Instance.Id].IsConnected() {
+			return
+		}
+	}
+
+	container, err := w.sharedContainer()
 
 	if err != nil {
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
@@ -622,6 +650,14 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 
 			if mycli.config.AmqpGlobalEnabled || mycli.config.NatsGlobalEnabled {
 				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
+			}
+
+			// Sem aparelho pareado (QR expirou sem leitura, ou o número saiu), reiniciar
+			// só gera outro QR que ninguém lê, em loop infinito. O próximo pedido de QR
+			// (GET /instance/qr) inicia o cliente de novo.
+			if client.Store == nil || client.Store.ID == nil {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] No paired device, not restarting client (waiting for a new QR request)", cd.Instance.Id)
+				return
 			}
 
 			// restart client
